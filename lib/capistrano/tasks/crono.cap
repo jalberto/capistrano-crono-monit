@@ -1,0 +1,183 @@
+namespace :load do
+  task :defaults do
+    set :crono_default_hooks, -> { true }
+
+    set :crono_pid, -> { File.join(shared_path, 'tmp', 'pids', 'crono.pid') }
+    set :crono_env, -> { fetch(:rack_env, fetch(:rails_env, fetch(:stage))) }
+    set :crono_log, -> { File.join(shared_path, 'log', 'crono.log') }
+    set :crono_timeout, -> { 10 }
+    set :crono_role, -> { :app }
+    # Rbenv and RVM integration
+    set :rbenv_map_bins, fetch(:rbenv_map_bins).to_a.concat(%w(crono))
+    set :rvm_map_bins, fetch(:rvm_map_bins).to_a.concat(%w(crono))
+
+    set :crono_monit_templates_path, -> { 'config/deploy/templates' }
+  end
+end
+
+
+namespace :deploy do
+  before :starting, :check_crono_hooks do
+    invoke 'crono:add_default_hooks' if fetch(:crono_default_hooks)
+  end
+  after :publishing, :restart_crono do
+    invoke 'crono:restart' if fetch(:crono_default_hooks)
+  end
+end
+
+namespace :crono do
+  def for_each_process(reverse = false, &block)
+    pids = processes_pids
+    pids.reverse! if reverse
+    pids.each_with_index do |pid_file, idx|
+      within release_path do
+        yield(pid_file, idx)
+      end
+    end
+  end
+
+  def processes_pids
+    pids = []
+    fetch(:crono_processes).times do |idx|
+      pids.push (idx.zero? && fetch(:crono_processes) <= 1) ?
+                    fetch(:crono_pid) :
+                    fetch(:crono_pid).gsub(/\.pid$/, "-#{idx}.pid")
+
+    end
+    pids
+  end
+
+  def pid_process_exists?(pid_file)
+    pid_file_exists?(pid_file) and test(*("kill -0 $( cat #{pid_file} )").split(' '))
+  end
+
+  def pid_file_exists?(pid_file)
+    test(*("[ -f #{pid_file} ]").split(' '))
+  end
+
+  def stop_crono(pid_file)
+    if fetch(:stop_crono_in_background, fetch(:crono_run_in_background))
+      if fetch(:crono_use_signals)
+        background "kill -TERM `cat #{pid_file}`"
+      else
+        background :bundle, :exec, :cronoctl, 'stop', "#{pid_file}", fetch(:crono_timeout)
+      end
+    else
+      execute :bundle, :exec, :cronoctl, 'stop', "#{pid_file}", fetch(:crono_timeout)
+    end
+  end
+
+  def start_crono(pid_file, idx = 0)
+    args = []
+    args.push "--pidfile #{pid_file}"
+    args.push "--environment #{fetch(:crono_env)}"
+    args.push "--logfile #{fetch(:crono_log)}" if fetch(:crono_log)
+    # use crono_options for special options
+    args.push fetch(:crono_options) if fetch(:crono_options)
+
+    if defined?(JRUBY_VERSION)
+      args.push '>/dev/null 2>&1 &'
+      warn 'Since JRuby doesn\'t support Process.daemon, crono will not be running as a daemon.'
+    else
+      args.push '--daemonize'
+    end
+
+    if fetch(:start_crono_in_background, fetch(:crono_run_in_background))
+      background :bundle, :exec, :crono, args.compact.join(' ')
+    else
+      execute :bundle, :exec, :crono, args.compact.join(' ')
+    end
+  end
+
+  task :add_default_hooks do
+    after 'deploy:updated', 'crono:stop'
+    after 'deploy:reverted', 'crono:stop'
+    after 'deploy:published', 'crono:start'
+  end
+
+  desc 'Stop crono'
+  task :stop do
+    on roles fetch(:crono_role) do
+      if test("[ -d #{release_path} ]")
+        for_each_process(true) do |pid_file, idx|
+          if pid_process_exists?(pid_file)
+            stop_crono(pid_file)
+          end
+        end
+      end
+    end
+  end
+
+  desc 'Start crono'
+  task :start do
+    on roles fetch(:crono_role) do
+      for_each_process do |pid_file, idx|
+        start_crono(pid_file, idx) unless pid_process_exists?(pid_file)
+      end
+    end
+  end
+
+  desc 'Restart crono'
+  task :restart do
+    invoke 'crono:stop'
+    invoke 'crono:start'
+  end
+
+  desc 'Rolling-restart crono'
+  task :rolling_restart do
+    on roles fetch(:crono_role) do
+      for_each_process(true) do |pid_file, idx|
+        if pid_process_exists?(pid_file)
+          stop_crono(pid_file)
+        end
+        start_crono(pid_file, idx)
+      end
+    end
+  end
+
+  # Delete any pid file not in use
+  task :cleanup do
+    on roles fetch(:crono_role) do
+      for_each_process do |pid_file, idx|
+        if pid_file_exists?(pid_file)
+          execute "rm #{pid_file}" unless pid_process_exists?(pid_file)
+        end
+      end
+    end
+  end
+
+  # TODO : Don't start if all processes are off, raise warning.
+  desc 'Respawn missing crono processes'
+  task :respawn do
+    invoke 'crono:cleanup'
+    on roles fetch(:crono_role) do
+      for_each_process do |pid_file, idx|
+        unless pid_file_exists?(pid_file)
+          start_crono(pid_file, idx)
+        end
+      end
+    end
+  end
+
+  def template_crono(from, to, role)
+    [
+        "#{fetch(:crono_monit_templates_path)}/#{from}.erb",
+        File.join('lib', 'capistrano', 'templates', "#{from}-#{role.hostname}-#{fetch(:stage)}.conf.rb"),
+        File.join('lib', 'capistrano', 'templates', "#{from}-#{role.hostname}-#{fetch(:stage)}.conf.rb"),
+        File.join('lib', 'capistrano', 'templates', "#{from}-#{role.hostname}.conf.rb"),
+        File.join('lib', 'capistrano', 'templates', "#{from}-#{fetch(:stage)}.conf.rb"),
+        File.join('lib', 'capistrano', 'templates', "#{from}.conf.rb.erb"),
+        File.join('lib', 'capistrano', 'templates', "#{from}.conf.rb"),
+        File.join('lib', 'capistrano', 'templates', "#{from}.conf.erb"),
+        File.expand_path("../../../generators/capistrano/crono/monit/templates/#{from}.conf.rb.erb", __FILE__),
+        File.expand_path("../../../generators/capistrano/crono/monit/templates/#{from}.conf.erb", __FILE__)
+    ].each do |path|
+      if File.file?(path)
+        erb = File.read(path)
+        upload! StringIO.new(ERB.new(erb).result(binding)), to
+        break
+      end
+    end
+  end
+
+end

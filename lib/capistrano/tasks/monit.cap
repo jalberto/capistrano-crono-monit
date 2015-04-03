@@ -1,0 +1,115 @@
+namespace :load do
+  task :defaults do
+    set :crono_monit_conf_dir, -> { '/etc/monit/conf.d' }
+    set :monit_bin, -> { '/usr/bin/monit' }
+    set :crono_monit_default_hooks, -> { true }
+  end
+end
+
+namespace :deploy do
+  before :starting, :check_crono_monit_hooks do
+    if fetch(:crono_default_hooks) && fetch(:crono_monit_default_hooks)
+      invoke 'crono:monit:add_default_hooks'
+    end
+  end
+end
+
+namespace :crono do
+  namespace :monit do
+
+    task :add_default_hooks do
+      before 'deploy:updating',  'crono:monit:unmonitor'
+      after  'deploy:published', 'crono:monit:monitor'
+    end
+
+    desc 'Config crono monit-service'
+    task :config do
+      on roles(fetch(:crono_role)) do |role|
+        @role = role
+        template_crono 'crono_monit', "#{fetch(:tmp_dir)}/monit.conf", @role
+
+        mv_command = "mv #{fetch(:tmp_dir)}/monit.conf #{fetch(:crono_monit_conf_dir)}/#{crono_service_name}.conf"
+
+        # Try execute in case the deploy user doesn't have sudo to mv
+        begin
+          execute mv_command
+        rescue
+          sudo mv_command
+        end
+
+        sudo "#{fetch(:monit_bin)} reload"
+      end
+    end
+
+    desc 'Monitor crono monit-service'
+    task :monitor do
+      on roles(fetch(:crono_role)) do
+        fetch(:crono_processes).times do |idx|
+          begin
+            sudo "#{fetch(:monit_bin)} monitor #{crono_service_name(idx)}"
+          rescue
+            invoke 'crono:monit:config'
+            sudo "#{fetch(:monit_bin)} monitor #{crono_service_name(idx)}"
+          end
+        end
+      end
+    end
+
+    desc 'Unmonitor crono monit-service'
+    task :unmonitor do
+      on roles(fetch(:crono_role)) do
+        fetch(:crono_processes).times do |idx|
+          begin
+            sudo "#{fetch(:monit_bin)} unmonitor #{crono_service_name(idx)}"
+          rescue
+            # no worries here
+          end
+        end
+      end
+    end
+
+    desc 'Start crono monit-service'
+    task :start do
+      on roles(fetch(:crono_role)) do
+        fetch(:crono_processes).times do |idx|
+          sudo "#{fetch(:monit_bin)} start #{crono_service_name(idx)}"
+        end
+      end
+    end
+
+    desc 'Stop crono monit-service'
+    task :stop do
+      on roles(fetch(:crono_role)) do
+        fetch(:crono_processes).times do |idx|
+          sudo "#{fetch(:monit_bin)} stop #{crono_service_name(idx)}"
+        end
+      end
+    end
+
+    desc 'Restart crono monit-service'
+    task :restart do
+      on roles(fetch(:crono_role)) do
+        fetch(:crono_processes).times do |idx|
+          sudo "#{fetch(:monit_bin)} restart #{crono_service_name(idx)}"
+        end
+      end
+    end
+
+    def crono_service_name(index=nil)
+      fetch(:crono_service_name, "crono_#{fetch(:application)}_#{fetch(:crono_env)}") + index.to_s
+    end
+
+    def crono_config
+      if fetch(:crono_config)
+        "--config #{fetch(:crono_config)}"
+      end
+    end
+
+    def crono_logfile
+      if fetch(:crono_log)
+        "--logfile #{fetch(:crono_log)}"
+      end
+    end
+
+  end
+end

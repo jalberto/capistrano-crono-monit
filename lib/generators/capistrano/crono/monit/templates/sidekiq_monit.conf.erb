@@ -1,0 +1,8 @@
+# Monit configuration for Crono :  <%= fetch(:application) %>
+<% processes_pids.each_with_index do |pid_file, idx| %>
+check process <%= crono_service_name(idx) %>
+  with pidfile "<%= pid_file %>"
+  start program = "/bin/su - <%= @role.user %> -c 'cd <%= current_path %> && <%= SSHKit.config.command_map[:bundle] %> exec crono  <%= crono_config %> --pidfile <%= pid_file %> --environment <%= fetch(:crono_env) %> <%= crono_logfile %> --daemonize'" with timeout 30 seconds
+  stop program = "kill -TERM `cat <%= pid_file %>`" with timeout <%= fetch(:crono_timeout).to_i + 10  %> seconds
+  group <%= fetch(:crono_monit_group, fetch(:application)) %>-crono
+<% end %>
